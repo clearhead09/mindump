@@ -1,0 +1,1424 @@
+from enum import Enum, auto
+import arcade
+import os
+import math
+import random
+
+SCREEN_WIDTH = 576
+SCREEN_HEIGHT = 576
+TITLE = "My Game"
+
+SPIN_SPEED = 1000
+
+# How many pixels to keep as a minimum margin between
+# the character and the edge of the screen
+LEFT_VIEWPORT_MARGIN = 200
+RIGHT_VIEWPORT_MARGIN = 200
+BOTTOM_VIEWPORT_MARGIN = 150
+TOP_VIEWPORT_MARGIN = 100
+
+# Constants used to scale our sprites from their original size
+TILE_SCALING = 0.5
+CHARACTER_SCALING = TILE_SCALING * 2
+COIN_SCALING = TILE_SCALING
+SPRITE_PIXEL_SIZE = 128
+GRID_PIXEL_SIZE = (SPRITE_PIXEL_SIZE * TILE_SCALING)
+
+# Important constants for this example
+
+# Speed limit
+MAX_SPEED = 4.0
+
+# How fast we accelerate
+ACCELERATION_RATE = 0.1
+
+# How fast to slow down after we letr off the key
+FRICTION = 0.01
+
+# Movement speed of player, in pixels per frame
+PLAYER_MOVEMENT_SPEED = 4
+GRAVITY = 1
+PLAYER_JUMP_SPEED = 13
+
+# Constants used to track if the player is facing left or right
+RIGHT_FACING = 0
+LEFT_FACING = 1
+UPDATES_PER_FRAME = 7
+
+BULLET_SPEED = 5
+
+LIFE_X = 200
+LIFE_Y = 600
+
+class States(Enum):
+    idle = auto()
+    chase = auto()
+    patrol = auto()
+    attack = auto()
+    death = auto()
+    walk_left = auto()
+    walk_right = auto()
+    circle = auto()
+    pause = auto()
+    blob = auto()
+    jump = auto()
+    hurt = auto()
+
+def load_texture_pair(filename):
+    """
+    Load a texture pair, with the second being a mirror image.
+    """
+    return [
+        arcade.load_texture(filename),
+        arcade.load_texture(filename, mirrored=True)
+    ]
+
+class Enemy(arcade.Sprite):
+
+    def __init__(self):
+        super().__init__()
+        self.hp = 0
+        self.attack = 0
+        self.defence = 0
+        self.speed = 0
+        self.type = None
+        self.state = "Emerge"
+        self.texture = None
+        self.can_attack = False
+        self.direction = RIGHT_FACING
+
+        # Used for flipping between image sequences
+        self.cur_texture = 0
+
+        # Animations
+        main_path = "images/zombie_pack/style_A/PNG/zombie_C/move/"
+        main_attack_path = "images/zombie_pack/style_A/PNG/zombie_C/attack_A/"
+        main_emerge_path = "images/zombie_pack/style_A/PNG/zombie_C/emerge_end/"
+
+        # Load textures for idle standing
+        self.idle_texture_pair = load_texture_pair(f"{main_path}0.png")
+
+        # Load textures for walking
+        self.walk_textures = []
+        for i in range(11):
+            texture = load_texture_pair(f"{main_path}{i}.png")
+            self.walk_textures.append(texture)
+
+        self.attack_textures = []
+        for i in range(14):
+            texture = load_texture_pair(f"{main_attack_path}{i}.png")
+            self.attack_textures.append(texture)
+
+        self.emerge_textures = []
+        for i in range(19):
+            texture = load_texture_pair(f"{main_emerge_path}{i}.png")
+            self.emerge_textures.append(texture)
+
+
+    def update_animation(self, delta_time: float = 1 / 60):
+
+        # Figure out if we need to flip face left or right
+        if self.change_x < 0 and self.direction == RIGHT_FACING:
+            self.direction = LEFT_FACING
+        elif self.change_x > 0 and self.direction == LEFT_FACING:
+            self.direction  = RIGHT_FACING
+
+        # Idle animation
+        if self.change_x == 0 and self.change_y == 0:
+            self.texture = self.idle_texture_pair[self.direction]
+            return
+
+        if self.state == "Patrol":
+            # Walking animation
+            self.cur_texture += 1
+            if self.cur_texture > 10 * UPDATES_PER_FRAME:
+                self.cur_texture = 0
+            self.texture = self.walk_textures[self.cur_texture // UPDATES_PER_FRAME][self.direction]
+            if self.direction == RIGHT_FACING:
+                self.change_x = self.speed
+
+        elif self.state == "Attack":
+            # Attack animation
+            self.cur_texture += 1
+            if self.cur_texture > 13 * UPDATES_PER_FRAME:
+                self.cur_texture = 0
+            self.texture = self.attack_textures[self.cur_texture // UPDATES_PER_FRAME][self.direction]
+
+        elif self.state == "Emerge":
+            #Emerging texture
+            self.cur_texture += 1
+            if self.cur_texture > 18 * UPDATES_PER_FRAME:
+                self.cur_texture = 0
+                self.state = "Patrol"
+            self.texture = self.emerge_textures[self.cur_texture // UPDATES_PER_FRAME][self.direction]
+
+        elif self.state == "Fly":
+            if self.direction == LEFT_FACING:
+                self.change_x = -self.speed
+            elif self.direction == RIGHT_FACING:
+                self.change_x = self.speed
+
+
+
+class PlayerCharacter(arcade.Sprite):
+    def __init__(self):
+
+        # Set up parent class
+        super().__init__()
+
+        # Default to face-right
+        self.character_face_direction = RIGHT_FACING
+
+        # Used for flipping between image sequences
+        self.cur_texture = 0
+
+        self.scale = CHARACTER_SCALING
+
+        # Track our state
+        self.jumping = False
+        self.climbing = False
+        self.is_on_ladder = False
+
+        self.is_dead = False
+
+        self.health = 10
+
+        # --- Load Textures ---
+        main_path = "images/sewer_player"
+
+        # Load textures for idle standing
+        self.idle_texture_pair = load_texture_pair(f"{main_path}.png")
+        self.jump_texture_pair = load_texture_pair(f"{main_path}.png")
+        self.fall_texture_pair = load_texture_pair(f"{main_path}.png")
+
+        # Load textures for walking
+        self.walk_textures = []
+        for i in range(2):
+            texture = load_texture_pair(f"{main_path}{i}.png")
+            self.walk_textures.append(texture)
+
+        # Load textures for climbing
+        self.climbing_textures = []
+        texture = arcade.load_texture(f"{main_path}1.png")
+        self.climbing_textures.append(texture)
+        texture = arcade.load_texture(f"{main_path}2.png")
+        self.climbing_textures.append(texture)
+
+        # Set the initial texture
+        self.texture = self.idle_texture_pair[0]
+
+        self.set_hit_box(self.texture.hit_box_points)
+
+    def update_animation(self, delta_time: float = 1/60):
+
+        # Figure out if we need to flip face left or right
+        if self.change_x < 0 and self.character_face_direction == RIGHT_FACING:
+            self.character_face_direction = LEFT_FACING
+        elif self.change_x > 0 and self.character_face_direction == LEFT_FACING:
+            self.character_face_direction = RIGHT_FACING
+
+        # Climbing animation
+        if self.is_on_ladder:
+            self.climbing = True
+        if not self.is_on_ladder and self.climbing:
+            self.climbing = False
+        if self.climbing and abs(self.change_y) > 1:
+            self.cur_texture += 1
+            if self.cur_texture > 2:
+                self.cur_texture = 0
+        if self.climbing:
+            self.texture = self.climbing_textures[self.cur_texture // 2]
+            return
+
+        # Jumping animation
+        if self.change_y > 0 and not self.is_on_ladder:
+            self.texture = self.jump_texture_pair[self.character_face_direction]
+            return
+        elif self.change_y < 0 and not self.is_on_ladder:
+            self.texture = self.fall_texture_pair[self.character_face_direction]
+            return
+
+        # Idle animation
+        if self.change_x == 0:
+            self.texture = self.idle_texture_pair[self.character_face_direction]
+            return
+
+        # Walking animation
+        self.cur_texture += 1
+        if self.cur_texture > 1:
+            self.cur_texture = 0
+        self.texture = self.walk_textures[self.cur_texture][self.character_face_direction]
+
+class projectile(Enemy):
+    def __init__(self):
+        super().__init__()
+        main_path = "images/"
+        self.idle_texture_pair = load_texture_pair(f"{main_path}saw1.png")
+        self.scale = 0.06
+        self.boundary_right = 0
+        self.boundary_left = 0
+
+        self.texture = self.idle_texture_pair[0]
+
+    def update_animation(self, delta_time: float = 1 / 60):
+        #self.change_x += delta_time
+        #self.spin()
+        self.patrol()
+
+    def spin(self):
+
+        self.state = States.circle
+        angle_rad = math.radians(self.angle)
+
+        # Set up the initial angle, and the "spin"
+        self.angle = random.randrange(360)
+        self.change_angle = random.randrange(-5, 20)
+        self.angle += self.change_angle * SPIN_SPEED
+
+
+    def patrol(self):
+        self.state = States.patrol
+        if self.center_x >= self.boundary_right:
+            self.change_x = 0
+            self.change_x -= self.speed
+            self.state = States.walk_left
+            self.spin()
+            #self.jump()
+        elif self.center_x <= self.boundary_left:
+            #self.reset_angle()
+            self.change_x += self.speed
+            self.state = States.walk_right
+            #self.shoot()
+            self.spin()
+
+class Blob(Enemy):
+
+    def __init__(self):
+        super().__init__()
+        self.frame_count = 0
+        # Default to face-right
+        self.character_face_direction = RIGHT_FACING
+        main_path = "images/"
+        self.idle_texture_pair = load_texture_pair(f"{main_path}green.png")
+        # Load textures for walking
+        self.hurt_textures = []
+        for i in range(4):
+            texture = load_texture_pair(f"{main_path}blob_ani{i}.png")
+            self.hurt_textures.append(texture)
+
+        self.cur_texture = 0
+    def update_animation(self, delta_time: float = 1/60):
+        self.frame_count += 1
+
+        self.texture = arcade.load_texture("images/blob.png")
+
+        # Walking animation
+        if self.state == States.hurt:
+            self.cur_texture += 1
+            if self.cur_texture > 3 * UPDATES_PER_FRAME:
+                self.cur_texture = 0
+            self.texture = self.hurt_textures[self.cur_texture // UPDATES_PER_FRAME][self.character_face_direction]
+            if self.frame_count % 60 == 0:
+                self.state = States.patrol
+                self.patrol()
+        else:
+            self.texture = arcade.load_texture("images/blob.png")
+
+    def patrol(self):
+        self.state = States.patrol
+        if self.center_x >= self.boundary_right:
+            self.change_x = 0
+            self.change_x -= self.speed
+            self.state = States.walk_left
+            #self.jump()
+        elif self.center_x <= self.boundary_left:
+            #self.reset_angle()
+            self.change_x += self.speed
+            self.state = States.walk_right
+            #self.shoot()
+        else:
+            self.change_x = self.speed
+
+
+class Game(arcade.Window):
+    def __init__(self):
+        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, TITLE)
+
+        file_path = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(file_path)
+
+        self.background = None
+
+        self.frame_count = 0
+
+        # Track the current state of what key is pressed
+        self.left_pressed = False
+        self.right_pressed = False
+        self.up_pressed = False
+        self.down_pressed = False
+        self.q_pressed = False
+        self.w_pressed = False
+        self.jump_needs_reset = False
+
+
+
+
+
+        self.player_list = None
+        self.player = None
+        self.player_health = None
+        self.player_health_bar = None
+        self.player_is_dead = False
+
+        self.wall_list = None
+        self.wall = None
+
+        self.seconds = None
+        self.physics_engine = None
+
+        self.enemy = None
+        self.blob = None
+        self.enemy_is_attacking = False
+        self.enemy_list = None
+        self.enemy_bullet_list = None
+        self.enemy_can_attack = False
+        self.level_2_enemy_list = None
+
+        # Level 2
+        self.enemy_4 = None
+        self.enemy_5 = None
+        self.enemy_6 = None
+        self.enemy_7 = None
+        self.circle = None
+        self.saw_list = None
+        self.enemy_hit = False
+
+        self.bullet_list = None
+        self.machine_gun_bullet = None
+        self.shotgun_bullet = None
+        self.gun_type = None
+        self.health_list = None
+
+        self.gun_badge = None
+        self.machine_gun_badge = None
+        self.shotgun_badge = None
+        self.ammo_badge = None
+        self.ammo_count = None
+        self.gun_1_left = None
+        self.gun_2_left = None
+        self.gun_3_left = None
+
+        self.dont_touch_list = None
+
+        self.life = None
+
+        self.npc = None
+        self.npc_list = None
+        self.npc_contact_player = False
+        self.npc_message = None
+
+        self.health_pack_list = None
+        self.health_pack = None
+        self.ammo_box = None
+        self.ammo_box_list = None
+        self.switch1 = None
+        self.switch2 = None
+        self.switch_list = None
+
+
+        # Where is the right edge of the map?
+        self.end_of_map = 0
+
+        # Level
+        self.level = 0
+
+        self.door = None
+        self.door_list = None
+        self.door_locked = True
+        self.switched = False
+
+
+
+        # Used to keep track of scrolling
+        self.view_left = 0
+        self.view_bottom = 0
+
+        self.proj = None
+        self.proj_list = None
+
+        self.red = None
+
+        # Load sounds
+        self.collect_coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
+        self.jump_sound = arcade.load_sound("sounds/jump.wav")
+        self.game_over = arcade.load_sound("sounds/player_die.wav")
+        self.shoot_sound = arcade.load_sound("sounds/Desert.wav")
+        self.shotgun_sound = arcade.load_sound("sounds/shotgun.wav")
+        self.machine_gun_sound = arcade.load_sound("sounds/semi.wav")
+        self.blood_sound = arcade.load_sound("sounds/zombie2.wav")
+        self.zombie_die_sound = arcade.load_sound("sounds/zombie_die.wav")
+        self.empty_clip = arcade.load_sound("sounds/empty_clip.wav")
+
+    def setup(self, level):
+
+        self.total_time = 0.0
+        # Level 2
+        self.enemy_list = arcade.SpriteList()
+
+        self.level_2_enemy_list = arcade.SpriteList()
+        self.enemy_4 = Enemy()
+        self.enemy_4.type = 2
+        self.enemy_4.hp = 20
+        self.enemy_4.attack = 20
+        self.enemy_4.defence = 20
+        self.enemy_4.speed = 1
+        self.enemy_4.center_x = 400
+        self.enemy_4.center_y = 507
+        self.enemy_4.boundary_left = 405
+        self.enemy_4.boundary_right = 600
+        self.enemy_4.texture = self.enemy_4.idle_texture_pair[0]
+        # self.enemy_2.scale = 2
+        self.enemy_list.append(self.enemy_4)
+
+
+
+        self.enemy_6 = Enemy()
+        self.enemy_6.type = 1
+        self.enemy_6.hp = 20
+        self.enemy_6.state = "Emerge"
+        self.enemy_6.texture = self.enemy_6.idle_texture_pair[0]
+        self.enemy_6.attack = 20
+        self.enemy_6.defence = 20
+        self.enemy_6.speed = 1
+        self.enemy_6.center_x = 300
+        self.enemy_6.center_y = 507
+        self.enemy_6.boundary_left = 300
+        self.enemy_6.boundary_right = 600
+        self.enemy_list.append(self.enemy_6)
+
+
+
+        self.proj = projectile()
+        self.proj.center_x = 100
+        self.proj.center_y = 100
+        self.proj.speed = 3
+        self.proj_list = arcade.SpriteList()
+        self.proj_list.append(self.proj)
+
+        self.foreground_list = arcade.SpriteList()
+        self.dark_list = arcade.SpriteList()
+        self.background_list = arcade.SpriteList()
+        self.foreground_objects_list = arcade.SpriteList()
+
+        self.circle = projectile()
+        #self.circle.state = States.circle
+        #self.circle.spin()
+        self.circle.scale = 0.04
+        self.circle.patrol()
+        self.circle.center_x = 215
+        self.circle.center_y = 695
+        self.circle.speed = 2
+        self.circle.attack = 10
+        self.circle.boundary_right = 750
+        self.circle.boundary_left = 215
+        self.saw_list = arcade.SpriteList()
+        self.saw_list.append(self.circle)
+
+
+
+        self.background = arcade.load_texture("images/Background.png")
+        self.background.scale = 3
+
+        self.light = arcade.Sprite("images/light.png")
+        self.light.alpha = 0
+        self.light.scale = 2
+        self.light_list = arcade.SpriteList()
+        self.light_list.append(self.light)
+
+        self.gun_type = "Gun"
+        self.health_list = arcade.SpriteList()
+        self.health_pack_list = arcade.SpriteList()
+        self.ammo_box_list = arcade.SpriteList()
+        self.switch_list = arcade.SpriteList()
+        self.door_list = arcade.SpriteList()
+        self.npc_list = arcade.SpriteList()
+        self.dont_touch_list = arcade.SpriteList()
+
+        self.player_list = arcade.SpriteList()
+        self.player = PlayerCharacter()
+        self.player.scale = 1.5
+        self.player.color = arcade.csscolor.BLACK
+        self.player.center_x = 200
+        self.player.center_y = 200
+        self.player_health_bar = 10
+
+        self.player_health = arcade.Sprite("images/health.png", 1)
+        self.player_hp = 50
+        self.player_health.width = self.player_hp
+        self.player_is_dead = False
+
+        self.health = arcade.Sprite("images/UIHere.png")
+
+        self.player_list.append(self.player)
+
+        self.enemy_health = arcade.Sprite("images/health.png", 1)
+        self.enemy_health.width = 50
+        self.health_list.append(self.enemy_health)
+
+        self.enemy_hit = arcade.Sprite("images/sewer_monster_hit.png", 2)
+        self.enemy_orig = arcade.Sprite("images/sewer_monster.png", 2)
+
+        self.bullet_list = arcade.SpriteList()
+        self.enemy_bullet_list = arcade.SpriteList()
+
+        self.health_pack = arcade.Sprite("images/health_pack.png", 2)
+        self.health_pack.center_x = 550
+        self.health_pack.center_y = 780
+        self.health_pack_list.append(self.health_pack)
+
+        self.ammo_box = arcade.Sprite("images/ammo_box.png", 1.5)
+        self.ammo_box.center_x = 550
+        self.ammo_box.center_y = 152
+        self.ammo_box_list.append(self.ammo_box)
+
+        self.switch1 = arcade.Sprite("images/lever_off.png", 1.5)
+        self.switch2 = arcade.Sprite("images/lever_on.png", 1.5)
+        self.switch1.center_x = 79
+        self.switch1.center_y = 630
+        self.switch1.color = arcade.csscolor.WHITE
+        self.switch2.center_x = 79
+        self.switch2.center_y = 630
+        self.switch_list.append(self.switch1)
+        self.switch_list.append(self.switch2)
+
+        self.door = arcade.Sprite("images/door.png", 1.5)
+        self.door.center_x = 550
+        self.door.center_y = 672
+        self.door_list.append(self.door)
+
+        self.npc = arcade.Sprite("images/sewer_npc.png", 1.5)
+        self.npc.center_x = 330
+        self.npc.center_y = 73
+        self.npc_list.append(self.npc)
+        self.npc_message = arcade.Sprite("images/npc_message1.png", 1.5)
+        self.npc_message.center_x = 250
+        self.npc_message.center_y = 135
+        self.red = arcade.Sprite("images/red.png", 1.5)
+        self.red.center_x = 300
+        self.red.center_y = 73
+
+        self.gun_badge = arcade.Sprite("images/gun_badge.png", 2)
+        self.gun_1 = arcade.Sprite("images/gun_badge.png", 1.5)
+        self.machine_gun_badge = arcade.Sprite("images/gun_badge_m.png", 2)
+        self.gun_2 = arcade.Sprite("images/gun_badge_m.png", 1.5)
+        self.shotgun_badge = arcade.Sprite("images/gun_badge_shotgun.png", 2)
+        self.gun_3 = arcade.Sprite("images/gun_badge_shotgun.png", 1.5)
+        self.ammo_badge = arcade.Sprite("images/ammo_badge.png", 2)
+        self.ammo_count = 10
+
+        self.gun_1_left = arcade.Sprite("images/gun_badge_left.png", 1.5)
+        self.gun_3_left = arcade.Sprite("images/gun_badge_shotgun-left.png", 1.5)
+        self.gun_2_left = arcade.Sprite("images/gun_badge_m_left.png", 1.5)
+
+        self.life = arcade.Sprite("images/life.png", 2)
+
+        # Viewport stuff
+        self.view_left = 0
+        self.view_bottom = 0
+        self.shake_screen = False
+        self.shake_count = 0
+        self.shake_intensity = 5
+
+        self.enemy_1 = Enemy()
+        self.enemy_1.type = 1
+        self.enemy_1.hp = 10
+        self.enemy_1.attack = 10
+        self.enemy_1.defence = 10
+        self.enemy_1.speed = 2
+        self.enemy_1.center_x = 340
+        self.enemy_1.center_y = 320
+        self.enemy_1.set_hit_box(self.enemy_1.texture)
+        self.enemy_1.boundary_left = 340
+        self.enemy_1.boundary_right = 560
+        self.enemy_list.append(self.enemy_1)
+
+        self.enemy_2 = Enemy()
+        self.enemy_2.type = 2
+        self.enemy_2.hp = 20
+        self.enemy_2.attack = 20
+        self.enemy_2.defence = 20
+        self.enemy_2.speed = 1
+        self.enemy_2.center_x = 500
+        self.enemy_2.center_y = 75
+        self.enemy_2.set_hit_box(self.enemy_2.texture)
+        self.enemy_2.boundary_left = 300
+        self.enemy_2.boundary_right = 600
+        self.enemy_list.append(self.enemy_2)
+
+        self.blob = Blob()
+        self.blob.state = States.patrol
+        self.blob.hp = 10
+        self.blob.center_x = 375
+        self.blob.center_y = 308
+        self.blob.speed = 0.3
+        self.blob.boundary_right = 375
+        self.blob.boundary_left = 270
+        self.blob_list = arcade.SpriteList()
+        self.blob_list.append(self.blob)
+        self.blob.set_hit_box(self.blob.texture)
+
+        platforms_layer_name = "Platforms"
+        do_not_touch_layer_name = "Do Not Touch"
+        foreground_layer_name = "Foreground"
+        background_layer_name = "Background"
+        dark_layer_name = "Dark"
+        foreground_objects_layer = "Foreground Objects"
+
+        map_name = f"sewer{level}.tmx"
+
+        my_map = arcade.tilemap.read_tmx(map_name)
+
+
+        # Platforms
+        # -- Foreground
+        self.foreground_list = arcade.tilemap.process_layer(my_map, foreground_layer_name, 1.5)
+        self.dont_touch_list = arcade.tilemap.process_layer(my_map, do_not_touch_layer_name, 1.5)
+        self.background_list = arcade.tilemap.process_layer(my_map, background_layer_name, 1.5)
+        self.dark_list = arcade.tilemap.process_layer(my_map, dark_layer_name, 1.5)
+        self.foreground_objects_list = arcade.tilemap.process_layer(my_map, foreground_objects_layer, 1.5)
+        self.wall_list = arcade.tilemap.process_layer(my_map, platforms_layer_name, 1.5)
+
+        # Set the background colour
+        if my_map.background_color:
+            arcade.set_background_color(arcade.csscolor.WHITE)
+
+        self.physics_engine = arcade.PhysicsEnginePlatformer(self.player,self.wall_list, gravity_constant=GRAVITY)
+        self.physics_engine.disable_multi_jump()
+
+    def restart(self):
+        self.player.center_x = 200
+        self.player.center_y = 200
+        self.player_hp = 50
+        self.player_is_dead = False
+        self.enemy_can_attack = False
+        for enemy in self.enemy_list:
+            enemy.state == "Patrol"
+
+        for enemy in self.level_2_enemy_list:
+            enemy.state == "Patrol"
+
+    def process_keychange(self):
+        """
+        Called when we change a key up/down or we move on/off a ladder.
+        """
+        if not self.player_is_dead:
+            # Process up/down
+            if self.up_pressed and not self.down_pressed:
+                if self.physics_engine.is_on_ladder():
+                    self.player.change_y = PLAYER_MOVEMENT_SPEED
+                elif self.physics_engine.can_jump() and not self.jump_needs_reset:
+                    self.player.change_y = PLAYER_JUMP_SPEED
+                    self.jump_needs_reset = True
+                    arcade.play_sound(self.jump_sound)
+            elif self.down_pressed and not self.up_pressed:
+                if self.physics_engine.is_on_ladder():
+                    self.player.change_y = -PLAYER_MOVEMENT_SPEED
+
+
+            # Process up/dowqn when on a ladder and no movement
+            if self.physics_engine.is_on_ladder():
+                if not self.up_pressed and not self.down_pressed:
+                    self.player.change_y = 0
+                elif self.up_pressed and self.down_pressed:
+                    self.player.change_y = 0
+
+            # Process left/right
+            if self.right_pressed and not self.left_pressed:
+                self.player.change_x = PLAYER_MOVEMENT_SPEED
+                self.player.character_face_direction = RIGHT_FACING
+            elif self.left_pressed and not self.right_pressed:
+                self.player.change_x = -PLAYER_MOVEMENT_SPEED
+                self.player.character_face_direction = LEFT_FACING
+            else:
+                self.player.change_x = 0
+
+    def on_key_press(self, key, modifiers):
+        """Called whenever a key is pressed. """
+        if self.player_is_dead:
+            self.left_pressed = False
+            self.right_pressed = False
+            self.up_pressed = False
+            self.down_pressed = False
+            self.w_pressed = False
+        else:
+            if key == arcade.key.UP:
+                self.up_pressed = True
+            elif key == arcade.key.DOWN or key == arcade.key.S:
+                self.down_pressed = True
+            elif key == arcade.key.LEFT or key == arcade.key.A:
+                self.left_pressed = True
+            elif key == arcade.key.RIGHT or key == arcade.key.D:
+                self.right_pressed = True
+            elif key == arcade.key.W:
+                self.w_pressed = True
+                if arcade.check_for_collision_with_list(self.player, self.switch_list):
+                    if self.switched:
+                        self.switched = False
+                    else:
+                        self.switched = True
+            elif key == arcade.key.Q:
+                self.ammo_count -= 1
+                if self.ammo_count <= 0:
+                    self.ammo_count = 0
+                    arcade.play_sound(self.empty_clip)
+                else:
+                    arcade.play_sound(self.shoot_sound)
+
+                    if self.gun_type == "Gun":
+                        bullet = arcade.Sprite("images/bullet.png", 2)
+                        bullet.color = arcade.csscolor.WHITE
+
+                        if self.player.character_face_direction == RIGHT_FACING:
+                            bullet.change_x = BULLET_SPEED
+                        else:
+                            bullet.change_x -= BULLET_SPEED
+                        bullet.center_x = self.player.left + self.player.width / 2 + 3
+                        bullet.center_y = self.player.top - self.player.height / 2 - 10
+
+                        self.bullet_list.append(bullet)
+                    elif self.gun_type == "Machine Gun":
+                        arcade.play_sound(self.machine_gun_sound)
+                        bullet = arcade.Sprite("images/machine_gun_bullet.png", 2)
+                        bullet.color = arcade.csscolor.WHITE
+                        if self.player.character_face_direction == RIGHT_FACING:
+                            bullet.change_x = BULLET_SPEED * 10
+                        else:
+                            bullet.change_x -= BULLET_SPEED * 10
+
+                        bullet.center_x = self.player.left + self.player.width / 2 + 3
+                        bullet.center_y = self.player.top - self.player.height / 2 - 10
+
+                        self.bullet_list.append(bullet)
+                    elif self.gun_type == "Shotgun":
+                        arcade.play_sound(self.shotgun_sound)
+                        bullet = arcade.Sprite("images/shotgun_bullet.png", 2)
+                        bullet.color = arcade.csscolor.WHITE
+                        if self.player.character_face_direction == RIGHT_FACING:
+                            bullet.change_x = BULLET_SPEED * 10
+                        else:
+                            bullet.change_x -= BULLET_SPEED * 10
+
+                        bullet.center_x = self.player.left + self.player.width / 2 + 3
+                        bullet.center_y = self.player.top - self.player.height / 2 - 10
+                        self.bullet_list.append(bullet)
+            elif key == arcade.key.SPACE:
+                if self.gun_type == "Gun":
+                    self.gun_type = "Machine Gun"
+                elif self.gun_type == "Machine Gun":
+                    self.gun_type = "Shotgun"
+                else:
+                    self.gun_type = "Gun"
+            self.process_keychange()
+
+    def on_key_release(self, key, modifiers):
+        """Called when the user releases a key. """
+
+        if key == arcade.key.UP or key == arcade.key.W:
+            self.up_pressed = False
+            self.jump_needs_reset = False
+        elif key == arcade.key.DOWN or key == arcade.key.S:
+            self.down_pressed = False
+        elif key == arcade.key.LEFT or key == arcade.key.A:
+            self.left_pressed = False
+        elif key == arcade.key.RIGHT or key == arcade.key.D:
+            self.right_pressed = False
+        elif key == arcade.key.W:
+            self.w_pressed = False
+
+        self.process_keychange()
+
+    def on_draw(self):
+
+        if not self.player_is_dead:
+            arcade.start_render()
+            self.red.draw()
+            # Draw the background texture
+            scale = SCREEN_WIDTH / self.background.width
+            arcade.draw_lrwh_rectangle_textured(0, 0,
+                                                SCREEN_WIDTH * 1.5, SCREEN_HEIGHT * 1.5,
+                                                self.background)
+            self.light.draw()
+            self.foreground_objects_list.draw()
+            self.player_list.draw()
+            self.wall_list.draw()
+            self.dark_list.draw()
+            self.enemy_list.draw()
+
+            if self.level == 0:
+
+                if self.switched:
+                    self.switch2.draw()
+                    self.door_locked = False
+                    self.door.remove_from_sprite_lists()
+                else:
+                    self.switch1.draw()
+                if self.door_locked:
+                    self.door_list.draw()
+
+                self.npc_list.draw()
+                if self.npc_contact_player:
+                    self.npc_message.alpha = 190
+                    self.npc_message.draw()
+                # arcade.finish_render()
+
+
+            elif self.level == 1:
+                self.saw_list.draw()
+                self.level_2_enemy_list.draw()
+            self.seconds = int(self.total_time) % 60
+            self.bullet_list.draw()
+            self.health_pack_list.draw()
+            self.ammo_box_list.draw()
+
+            self.dont_touch_list.draw()
+
+            if self.gun_type == "Gun" and self.player.character_face_direction == RIGHT_FACING:
+                self.gun_badge.center_x = self.view_left + 100
+                self.gun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.gun_badge.draw()
+                self.gun_1.center_x = self.player.center_x + self.player.width / 2
+                self.gun_1.center_y = self.player.center_y
+                self.gun_1.draw()
+            elif self.gun_type == "Gun" and self.player.character_face_direction == LEFT_FACING:
+                self.gun_badge.center_x = self.view_left + 100
+                self.gun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.gun_badge.draw()
+                self.gun_1_left.center_x = self.player.center_x - self.player.width / 2
+                self.gun_1_left.center_y = self.player.center_y
+                self.gun_1_left.draw()
+            elif self.gun_type == "Shotgun" and self.player.character_face_direction == RIGHT_FACING:
+                self.shotgun_badge.center_x = self.view_left + 100
+                self.shotgun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.shotgun_badge.draw()
+                self.gun_3.center_x = self.player.center_x + self.player.width / 2
+                self.gun_3.center_y = self.player.center_y
+                self.gun_3.draw()
+            elif self.gun_type == "Shotgun" and self.player.character_face_direction == LEFT_FACING:
+                self.shotgun_badge.center_x = self.view_left + 100
+                self.shotgun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.shotgun_badge.draw()
+                self.gun_3_left.center_x = self.player.center_x - self.player.width / 2
+                self.gun_3_left.center_y = self.player.center_y
+                self.gun_3_left.draw()
+            elif self.gun_type == "Machine Gun" and self.player.character_face_direction == RIGHT_FACING:
+                self.machine_gun_badge.center_x = self.view_left + 100
+                self.machine_gun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.machine_gun_badge.draw()
+                self.gun_2.center_x = self.player.center_x + self.player.width / 2
+                self.gun_2.center_y = self.player.center_y
+                self.gun_2.draw()
+            elif self.gun_type == "Machine Gun" and self.player.character_face_direction == LEFT_FACING:
+                self.machine_gun_badge.center_x = self.view_left + 100
+                self.machine_gun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.machine_gun_badge.draw()
+                self.gun_2_left.center_x = self.player.center_x - self.player.width / 2
+                self.gun_2_left.center_y = self.player.center_y
+                self.gun_2_left.draw()
+
+            self.ammo_badge.center_x = self.view_left + 140
+            self.ammo_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+
+            self.foreground_list.draw()
+
+            z = int(self.player_health.width * 3)
+            if self.player_hp > 1:
+                for x in range(0, z, 30):
+                    self.health.position = (self.view_left + 187 + x, self.view_bottom + SCREEN_HEIGHT - 50)
+                    self.health.draw()
+
+            ammo_count = f"{self.ammo_count}"
+            arcade.draw_text(ammo_count, self.ammo_badge.center_x - 12, self.ammo_badge.center_y - 12,
+                             arcade.csscolor.WHITE, 16)
+
+            if self.gun_type == "Gun":
+                self.gun_badge.center_x = self.view_left + 100
+                self.gun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.gun_badge.draw()
+            elif self.gun_type == "Shotgun":
+                self.shotgun_badge.center_x = self.view_left + 100
+                self.shotgun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.shotgun_badge.draw()
+            elif self.gun_type == "Machine Gun":
+                self.machine_gun_badge.center_x = self.view_left + 100
+                self.machine_gun_badge.center_y = self.view_bottom + SCREEN_HEIGHT - 50
+                self.machine_gun_badge.draw()
+
+
+    def update(self, delta_time: float = 1/60):
+        self.physics_engine.disable_multi_jump()
+        self.health_list.update()
+        self.enemy_list.update_animation()
+        self.wall_list.update()
+        self.enemy_list.update()
+        self.proj.update()
+        self.proj_list.update_animation()
+        self.foreground_list.update()
+        self.saw_list.update_animation()
+        self.saw_list.update()
+        self.blob_list.update_animation()
+        self.blob_list.update()
+        self.enemy_bullet_list.update()
+        if self.level == 1:
+            self.level_2_enemy_list.draw()
+
+
+
+        for light in self.light_list:
+            light.center_x = self.player.center_x
+            light.center_y = self.player.center_y
+
+        self.total_time += delta_time
+
+        if self.player.change_x > 1:
+            for tiles in self.foreground_list:
+                if arcade.get_distance_between_sprites(self.light, tiles) < 220:
+                    tiles.alpha = 100
+                else:
+                    tiles.alpha = 200
+        elif self.player.change_x < 1:
+            for tiles in self.foreground_list:
+                if arcade.get_distance_between_sprites(self.light, tiles) < 220:
+                    tiles.alpha = 100
+                else:
+                    tiles.alpha = 200
+
+        if self.player_hp <= 1:
+            self.player_hp = 0
+            self.player.remove_from_sprite_lists()
+            self.restart()
+            arcade.play_sound(self.game_over)
+
+        if arcade.check_for_collision_with_list(self.player, self.dont_touch_list):
+            self.player_is_dead = True
+            arcade.play_sound(self.game_over)
+            self.player_hp = 0
+            self.enemy_can_attack = False
+            self.restart()
+
+
+        # Shake screen code
+        if self.shake_screen:
+            shake = [(self.shake_intensity, 0),
+                     (self.shake_intensity, self.shake_intensity),
+                     (0, self.shake_intensity)]
+
+            self.set_viewport(self.view_left + shake[self.shake_count][0],
+                              self.view_left + SCREEN_WIDTH + shake[self.shake_count][0],
+                              self.view_bottom + shake[self.shake_count][1],
+                              self.view_bottom + SCREEN_HEIGHT + shake[self.shake_count][1])
+            self.shake_count += 1
+            if self.shake_count == 3:
+                self.shake_screen = False
+                self.shake_count = 0
+        else:
+            self.set_viewport(self.view_left, self.view_left + SCREEN_WIDTH, self.view_bottom, self.view_bottom + SCREEN_HEIGHT)
+
+        self.frame_count += 1
+        if self.level == 0:
+            for enemy in self.enemy_list:
+                if enemy.state == "Emerge":
+                    enemy.change_x = 0.01
+                elif enemy.state == "Fly":
+                    # enemy.change_x = enemy.speed
+                    if enemy.direction == LEFT_FACING:
+                        enemy.change_x = -enemy.speed
+                    elif enemy.direction == RIGHT_FACING:
+                        enemy.change_x = enemy.speed
+
+                    if enemy.left < enemy.boundary_left:
+                        enemy.direction = RIGHT_FACING
+                        enemy.change_x = enemy.speed
+                    elif enemy.right > enemy.boundary_right:
+                        enemy.direction = LEFT_FACING
+                        enemy.change_x = -enemy.speed
+
+                    if self.frame_count % 60 == 0:
+                        enemy.change_y = -0.5
+                        if enemy.bottom <= 580:
+                            enemy.change_y = 0.05
+                            if enemy.center_y == 600:
+                                enemy.change_y = 0
+                elif not enemy.can_attack and enemy.state == "Patrol":
+                    enemy.can_attack = False
+                    enemy.state = "Patrol"
+                    if enemy.center_x >= enemy.boundary_right:
+                        enemy.change_x = - enemy.speed
+                        enemy.direction = LEFT_FACING
+                    elif enemy.center_x <= enemy.boundary_left:
+                        enemy.change_x = enemy.speed
+                        enemy.direction = RIGHT_FACING
+                    elif enemy.change_x == 0:
+                        enemy.change_x = enemy.speed
+
+                    if arcade.check_for_collision_with_list(enemy, self.wall_list):
+                        if enemy.direction == LEFT_FACING:
+                            enemy.change_x = enemy.speed
+                        elif enemy.direction == RIGHT_FACING:
+                            enemy.change_x = -enemy.speed
+
+                elif enemy.state == "Attack":
+                    if self.frame_count % 60 == 0:
+                        self.player_hp -= enemy.attack
+                        self.shake_screen = True
+
+                if arcade.get_distance_between_sprites(self.player, enemy) < 100:
+                    enemy.state = "Attack"
+                    # If the player is on our right
+                    if enemy.left < self.player.left:
+                        if arcade.get_distance_between_sprites(self.player, enemy) <= 50:
+                            # enemy.change_x = 0
+                            enemy.can_attack = True
+                            enemy.state = "Attack"
+                        else:
+                            enemy.state = "Patrol"
+                            enemy.can_attack = False
+                            if enemy.center_x == 0:
+                                enemy.change_x = 0
+                    # If player is on our left
+                    elif enemy.left > self.player.left:
+                        if arcade.get_distance_between_sprites(self.player, enemy) <= 50:
+                            # enemy.change_x = 0
+                            enemy.can_attack = True
+                            enemy.state = "Attack"
+                        else:
+                            enemy.can_attack = False
+                            enemy.state = "Patrol"
+                            if enemy.center_x == 600:
+                                enemy.change_x = 0
+                    elif enemy.left == self.player.left:
+                        enemy.can_attack = True
+                        # enemy.change_x = 0
+
+                if arcade.check_for_collision_with_list(enemy, self.player_list):
+                    if enemy.left < self.player.left:
+                        enemy.direction = LEFT_FACING
+                        # enemy.center_x = self.player.center_x - 40
+                        enemy.change_x = 0.1
+                        enemy.can_attack = True
+                    elif enemy.left > self.player.left:
+                        enemy.direction = RIGHT_FACING
+                        # enemy.center_x = self.player.center_x + 40
+                        enemy.change_x = -0.1
+                    else:
+                        enemy.can_attack = False
+
+                if self.player_hp <= 1:
+                    self.player_hp = 0
+                    self.player.remove_from_sprite_lists()
+                    self.restart()
+                    arcade.play_sound(self.game_over)
+
+                if arcade.check_for_collision_with_list(self.player, self.dont_touch_list):
+                    self.player_is_dead = True
+                    arcade.play_sound(self.game_over)
+                    self.player_hp = 0
+                    self.enemy_can_attack = False
+                    self.restart()
+
+                # Shake screen code
+                if self.shake_screen:
+                    shake = [(self.shake_intensity, 0),
+                             (self.shake_intensity, self.shake_intensity),
+                             (0, self.shake_intensity)]
+
+                    self.set_viewport(self.view_left + shake[self.shake_count][0],
+                                      self.view_left + SCREEN_WIDTH + shake[self.shake_count][0],
+                                      self.view_bottom + shake[self.shake_count][1],
+                                      self.view_bottom + SCREEN_HEIGHT + shake[self.shake_count][1])
+                    self.shake_count += 1
+                    if self.shake_count == 3:
+                        self.shake_screen = False
+                        self.shake_count = 0
+                else:
+                    self.set_viewport(self.view_left, self.view_left + SCREEN_WIDTH, self.view_bottom,
+                                      self.view_bottom + SCREEN_HEIGHT)
+
+        ######## LEVEL 1 #################################################
+
+        elif self.level == 1:
+            for enemy in self.level_2_enemy_list:
+                if enemy.state == "Emerge":
+                    enemy.change_x = 0.01
+                elif enemy.state == "Patrol":
+                    enemy.can_attack = False
+                    enemy.change_x = enemy.speed
+                    if enemy.center_x >= enemy.boundary_right:
+                        enemy.change_x = - enemy.speed
+                        enemy.direction = LEFT_FACING
+                    elif enemy.center_x <= enemy.boundary_left:
+                        enemy.change_x = enemy.speed
+                        enemy.direction = RIGHT_FACING
+                    elif enemy.change_x == 0:
+                        enemy.change_x = enemy.speed
+                        # for attack in self.enemy_attack_list:
+                        #    attack.remove_from_sprite_lists()
+
+                    if arcade.check_for_collision_with_list(enemy, self.wall_list):
+                        if enemy.direction == LEFT_FACING:
+                            enemy.change_x = enemy.speed
+                        elif enemy.direction == RIGHT_FACING:
+                            enemy.change_x = -enemy.speed
+
+                elif enemy.state == "Attack":
+                    if self.frame_count % 60 == 0:
+                        self.player_hp -= enemy.attack
+                        self.shake_screen = True
+                        enemy.can_attack = False
+                        enemy.state = "Patrol"
+
+
+                if arcade.get_distance_between_sprites(self.player, enemy) < 100:
+                    enemy.state = "Attack"
+                        # If the player is on our right
+                    if enemy.left < self.player.left:
+                        if arcade.get_distance_between_sprites(self.player, enemy) <= 50:
+                                # enemy.change_x = 0
+                            enemy.can_attack = True
+                            enemy.state = "Attack"
+                        else:
+                            enemy.state = "Patrol"
+                            enemy.can_attack = False
+                            if enemy.center_x == 0:
+                                enemy.change_x = 0
+                    # If player is on our left
+                    elif enemy.left > self.player.left:
+                        if arcade.get_distance_between_sprites(self.player, enemy) <= 50:
+                                # enemy.change_x = 0
+                            enemy.can_attack = True
+                            enemy.state = "Attack"
+                        else:
+                            enemy.can_attack = False
+                            enemy.state = "Patrol"
+                            if enemy.center_x == 600:
+                                enemy.change_x = 0
+                    elif enemy.left == self.player.left:
+                        enemy.can_attack = True
+                            # enemy.change_x = 0
+
+                if arcade.check_for_collision_with_list(enemy, self.player_list):
+                    if enemy.left < self.player.left:
+                        enemy.direction = LEFT_FACING
+                            # enemy.center_x = self.player.center_x - 40
+                        enemy.change_x = 0.1
+                        enemy.can_attack = True
+                    elif enemy.left > self.player.left:
+                        enemy.direction = RIGHT_FACING
+                            # enemy.center_x = self.player.center_x + 40
+                        enemy.change_x = -0.1
+                    else:
+                        enemy.can_attack = False
+
+            ##########################################
+            # Work on zombies in level 2 patrolling - currently do walking animation but no movement, refer back to AI.py
+            ##########################################
+
+        ##########################################
+        # NPC
+        ##########################################
+
+        for npc in self.npc_list:
+            hit_list = arcade.check_for_collision_with_list(self.player, self.npc_list)
+
+            if len(hit_list) > 0:
+                self.npc_contact_player = True
+            else:
+                self.npc_contact_player = False
+
+        for door in self.door_list:
+            hit_list = arcade.check_for_collision_with_list(self.player, self.door_list)
+
+            if len(hit_list) > 0:
+                self.player.center_x = door.center_x - 32
+            self.door_list.update()
+
+        for health in self.health_pack_list:
+            hit_list = arcade.check_for_collision_with_list(health, self.player_list)
+
+            if len(hit_list) > 0:
+                health.remove_from_sprite_lists()
+                self.player_health.width += 5
+
+        for player in self.player_list:
+            hit_list = arcade.check_for_collision_with_list(player, self.enemy_list)
+            hit_list_2 = arcade.check_for_collision_with_list(player, self.level_2_enemy_list)
+
+            if len(hit_list) > 0:
+                self.life.left -= 5
+                for cur_player in hit_list:
+                    self.player_health.width -= 5
+
+            if len(hit_list_2) < 0:
+                self.life.left -= 5
+                for cur_player in hit_list_2:
+                    self.player_health.width -= 5
+
+
+            if self.player_hp <= 0:
+                self.player_is_dead = True
+                arcade.play_sound(self.game_over)
+                self.player_health.width = 0
+                self.enemy_can_attack = False
+                self.restart()
+
+
+
+
+        for ammo_boxes in self.ammo_box_list:
+            hit_list = arcade.check_for_collision_with_list(ammo_boxes, self.player_list)
+
+            if len(hit_list) > 0:
+                ammo_boxes.remove_from_sprite_lists()
+                self.ammo_count += 10
+
+        # Loop though the bullet in each list
+        for bullet in self.bullet_list:
+            # Check to see if the bullet hit a monster
+            hit_list = arcade.check_for_collision_with_list(bullet, self.enemy_list)
+            hit_list_2 = arcade.check_for_collision_with_list(bullet, self.level_2_enemy_list)
+            # If it did, get rid of the bullet
+            if len(hit_list) > 0:
+                bullet.remove_from_sprite_lists()
+
+            if len(hit_list_2) > 0:
+                bullet.remove_from_sprite_lists()
+
+
+            # If we hit a monster, remove it from the list
+            for enemy in hit_list:
+                if self.gun_type == "Gun":
+                    self.enemy_health.width -= 5
+                elif self.gun_type == "Machine Gun":
+                    self.enemy_health.width -= 10
+                elif self.gun_type == "Shotgun":
+                    self.enemy_health.width -= 15
+                if self.enemy_health.width <= 0:
+                    arcade.play_sound(self.zombie_die_sound)
+                    self.enemy_can_attack = False
+                    self.enemy_health.width = 0
+                    enemy.remove_from_sprite_lists()
+
+            for enemy in hit_list_2:
+                if self.gun_type == "Gun":
+                    self.enemy_health.width -= 5
+                elif self.gun_type == "Machine Gun":
+                    self.enemy_health.width -= 10
+                elif self.gun_type == "Shotgun":
+                    self.enemy_health.width -= 15
+                if self.enemy_health.width <= 0:
+                    arcade.play_sound(self.zombie_die_sound)
+                    self.enemy_can_attack = False
+                    self.enemy_health.width = 0
+                    enemy.remove_from_sprite_lists()
+
+
+            # If bullet flies off screen, remove it
+            if bullet.left > SCREEN_WIDTH + 1000:
+                    bullet.remove_from_sprite_lists()
+
+
+        # Update animations
+        if self.physics_engine.can_jump():
+            self.player.can_jump = False
+        else:
+            self.player.can_jump = True
+
+        if self.physics_engine.is_on_ladder() and not self.physics_engine.can_jump():
+            self.player.is_on_ladder = True
+            self.process_keychange()
+        else:
+            self.player.is_on_ladder = False
+            self.process_keychange()
+
+        self.player_list.update_animation(delta_time)
+
+        self.health_list.update()
+        self.bullet_list.update()
+
+        self.physics_engine.update()
+        if self.player_is_dead:
+            pass
+        else:
+            self.player_list.update()
+
+
+
+        # Scrolling
+        changed_viewport = False
+
+        # See if the user got to the end of the level
+        if arcade.check_for_collision(self.player,self.red):
+            # Advance to the next level
+            self.level += 1
+            self.setup_2()
+
+            # Load the next level
+            self.setup(self.level)
+
+            #self.player.center_x = 100
+            #self.player.center_y = 1000
+
+            # Set the camera to the start
+            self.view_left = 0
+            self.view_bottom = 0
+            changed_viewport = True
+
+        # Scroll left
+        left_boundary = self.view_left + LEFT_VIEWPORT_MARGIN
+        if self.player.left < left_boundary:
+            self.view_left -= left_boundary - self.player.left
+            changed_viewport = True
+
+        # Scroll right
+        right_boundary = self.view_left + SCREEN_WIDTH - RIGHT_VIEWPORT_MARGIN
+        if self.player.right > right_boundary:
+            self.view_left += self.player.right - right_boundary
+            changed_viewport = True
+
+        # Scroll up
+        top_boundary = self.view_bottom + SCREEN_HEIGHT - TOP_VIEWPORT_MARGIN
+        if self.player.top > top_boundary:
+            self.view_bottom += self.player.top - top_boundary
+            changed_viewport = True
+
+        # Scroll down
+        bottom_boundary = self.view_bottom + BOTTOM_VIEWPORT_MARGIN
+        if self.player.bottom < bottom_boundary:
+            self.view_bottom -= bottom_boundary - self.player.bottom
+            changed_viewport = True
+
+        if self.player.bottom < bottom_boundary - 400:
+            self.player.center_x = 200
+            self.player.center_y = 200
+
+        if changed_viewport:
+            # Only scroll to ingegers, otherwise we end up with
+            # pixels that don't like up on the screen
+            self.view_bottom = int(self.view_bottom)
+            self.view_left = int(self.view_left)
+
+
+            # Do the scrolling
+            arcade.set_viewport(self.view_left, SCREEN_WIDTH + self.view_left, self.view_bottom, SCREEN_HEIGHT + self.view_bottom)
+
+
+
+
+def main():
+    window = Game()
+    window.setup(window.level)
+    arcade.run()
+
+
+if __name__ == "__main__":
+    main()
+
